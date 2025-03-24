@@ -2,41 +2,69 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"time"
 
 	"github.com/golang-queue/queue"
+	"github.com/golang-queue/queue/core"
 )
 
-func sleepSomeTime() string {
-	sleepTime := time.Duration(rand.Intn(60)) * time.Second
-	message := fmt.Sprintf("%s\n", sleepTime)
-	fmt.Printf("About to process: %s\n", message)
-	time.Sleep(sleepTime)
-	return message
+type jobData struct {
+	Name    string
+	Message string
 }
 
-func job(i int, rets chan string) func(ctx context.Context) error {
-	return func(ctx context.Context) error {
-		sleepSomeTime()
-		rets <- fmt.Sprintf("Hello commander, I am handling the job: %02d", +i)
-		return nil
-	}
+func (j *jobData) Bytes() []byte {
+	fmt.Printf("%s:%s\n", j.Name, j.Message)
+	res := sleepSomeTime()
+	j.Name = "I am awake"
+	j.Message = res
+	b, _ := json.Marshal(j)
+	return b
+}
+
+func (j *jobData) Payload() []byte {
+	return j.Bytes()
+}
+
+func sleepSomeTime() string {
+	seconds := rand.Intn(20)
+	sleepTime := time.Duration(seconds) * time.Second
+	time.Sleep(sleepTime)
+	return fmt.Sprintf("Commander, I slept: %d seconds", seconds)
 }
 
 func StartQueue() {
 	taskN := 100
 	rets := make(chan string, taskN)
-	q := queue.NewPool(5)
-	defer q.Release()
+	q := queue.NewPool(30, queue.WithFn(func(ctx context.Context, m core.TaskMessage) error {
+		var v jobData
+		if err := json.Unmarshal(m.Payload(), &v); err != nil {
+			return err
+		}
 
-	for i := range make([]struct{}, taskN) {
-		fmt.Println("queueing job:", i)
-		go q.QueueTask(job(i, rets))
+		// Check if v is empty after unmarshalling
+		if v.Name == "" && v.Message == "" {
+			fmt.Println("Warning: jobData is empty after unmarshalling")
+			rets <- "Empty job data received"
+		} else {
+			rets <- "Hello, " + v.Name + ", " + v.Message
+		}
+		return nil
+	}))
+	defer q.Release()
+	for i := 0; i < taskN; i++ {
+		go func(i int) {
+			q.Queue(&jobData{
+				Name:    "Sleeping Gophers",
+				Message: fmt.Sprintf("Hello commander, I am handling the job: %d", +i),
+			})
+		}(i)
 	}
-	for range make([]struct{}, taskN) {
+	for i := 0; i < taskN; i++ {
 		fmt.Println("message:", <-rets)
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
